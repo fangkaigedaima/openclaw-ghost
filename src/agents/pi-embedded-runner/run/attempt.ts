@@ -2479,6 +2479,12 @@ export async function runEmbeddedAttempt(
       };
       scheduleAbortTimer(params.timeoutMs, "initial");
 
+      const markSessionProgress = () =>
+        markDiagnosticSessionProgress({
+          sessionId: params.sessionId,
+          sessionKey: params.sessionKey,
+        });
+
       let messagesSnapshot: AgentMessage[] = [];
       let sessionIdUsed = activeSession.sessionId;
       let sessionFileUsed: string | undefined = params.sessionFile;
@@ -3032,6 +3038,7 @@ export async function runEmbeddedAttempt(
               messages: btwSnapshotMessages,
               inFlightPrompt: promptSubmission.prompt,
             });
+            markSessionProgress();
             if (promptSubmission.runtimeOnly) {
               await abortable(activeSession.prompt(promptSubmission.prompt));
             } else {
@@ -3139,6 +3146,7 @@ export async function runEmbeddedAttempt(
                 abortable,
                 aggregateTimeoutMs: COMPACTION_RETRY_AGGREGATE_TIMEOUT_MS,
                 isCompactionStillInFlight: isCompactionInFlight,
+                onHeartbeat: markSessionProgress,
               });
           if (compactionRetryWait.timedOut) {
             timedOutDuringCompaction = true;
