@@ -1,6 +1,5 @@
 import type { Agent } from "node:https";
 import { createRequire } from "node:module";
-import * as Lark from "@larksuiteoapi/node-sdk";
 import {
   readPluginPackageVersion,
   resolveAmbientNodeProxyAgent,
@@ -14,6 +13,7 @@ import {
 import type { FeishuConfig, FeishuDomain, ResolvedFeishuAccount } from "./types.js";
 
 const require = createRequire(import.meta.url);
+const Lark = require("@larksuiteoapi/node-sdk") as typeof import("@larksuiteoapi/node-sdk");
 const pluginVersion = readPluginPackageVersion({ require });
 
 export { pluginVersion };

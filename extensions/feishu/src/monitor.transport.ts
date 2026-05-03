@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import * as http from "node:http";
-import * as Lark from "@larksuiteoapi/node-sdk";
 import { waitForAbortableDelay } from "./async.js";
 import { createFeishuWSClient } from "./client.js";
 import {
@@ -27,7 +26,7 @@ type MonitorTransportParams = {
   accountId: string;
   runtime?: RuntimeEnv;
   abortSignal?: AbortSignal;
-  eventDispatcher: Lark.EventDispatcher;
+  eventDispatcher: ReturnType<(typeof import("./client.js"))["createEventDispatcher"]>;
 };
 
 const FEISHU_WS_RECONNECT_INITIAL_DELAY_MS = 1_000;
@@ -133,7 +132,7 @@ function isFeishuWsTerminalError(err: Error): boolean {
 
 function cleanupFeishuWsClient(params: {
   accountId: string;
-  wsClient?: Lark.WSClient;
+  wsClient?: Awaited<ReturnType<typeof createFeishuWSClient>>;
   error: (message: string) => void;
   clearIdentity: boolean;
 }): void {
@@ -204,7 +203,7 @@ export async function monitorWebSocket({
       break;
     }
 
-    let wsClient: Lark.WSClient | undefined;
+    let wsClient: Awaited<ReturnType<typeof createFeishuWSClient>> | undefined;
     try {
       let reportTerminalError: (err: Error) => void = () => {};
       const terminalError = new Promise<Error>((resolve) => {
