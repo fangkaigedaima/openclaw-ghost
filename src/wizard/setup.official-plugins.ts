@@ -9,6 +9,7 @@ import {
   resolveOfficialExternalPluginLabel,
 } from "../plugins/official-external-plugin-catalog.js";
 import type { RuntimeEnv } from "../runtime.js";
+import { t } from "./i18n/index.js";
 import type { WizardPrompter } from "./prompts.js";
 
 const SKIP_VALUE = "__skip__";
@@ -18,6 +19,7 @@ export type OfficialPluginOnboardingInstallEntry = {
   label: string;
   description?: string;
   install: PluginPackageInstall;
+  trustedSourceLinkedOfficialInstall?: boolean;
 };
 
 function isInstalledOrConfigured(config: OpenClawConfig, pluginId: string): boolean {
@@ -54,7 +56,7 @@ function formatInstallHint(install: PluginPackageInstall): string {
   return "install source";
 }
 
-export const __testing = {
+export const testing = {
   formatInstallHint,
 };
 
@@ -76,6 +78,7 @@ export function resolveOfficialPluginOnboardingInstallEntries(params: {
       label: resolveOfficialExternalPluginLabel(entry),
       ...(entry.description ? { description: entry.description } : {}),
       install,
+      trustedSourceLinkedOfficialInstall: true,
     });
   }
   return entries.toSorted((left, right) => left.label.localeCompare(right.label));
@@ -95,12 +98,12 @@ export async function setupOfficialPluginInstalls(params: {
   }
 
   const selected = await params.prompter.multiselect({
-    message: "Install optional plugins",
+    message: t("wizard.plugins.officialInstall"),
     options: [
       {
         value: SKIP_VALUE,
-        label: "Skip for now",
-        hint: "Continue without installing optional plugins",
+        label: t("common.skipForNow"),
+        hint: t("wizard.plugins.officialSkipHint"),
       },
       ...installEntries.map((entry) => ({
         value: entry.pluginId,
@@ -128,3 +131,4 @@ export async function setupOfficialPluginInstalls(params: {
   }
   return next;
 }
+export { testing as __testing };

@@ -1,8 +1,11 @@
-import fs from "node:fs";
 import path from "node:path";
 import { MANIFEST_KEY } from "../../compat/legacy-names.js";
+import type { PluginInstallRecord } from "../../config/types.plugins.js";
+import { tryReadJsonSync } from "../../infra/json-files.js";
+import { isPrereleaseSemverVersion, parseRegistryNpmSpec } from "../../infra/npm-registry-spec.js";
 import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 import { listChannelCatalogEntries } from "../../plugins/channel-catalog-registry.js";
+import type { PluginDiscoveryResult } from "../../plugins/discovery.js";
 import {
   describePluginInstallSource,
   type PluginInstallSourceInfo,
@@ -39,6 +42,7 @@ export type ChannelPluginCatalogEntry = {
   id: string;
   pluginId?: string;
   origin?: PluginOrigin;
+  trustedSourceLinkedOfficialInstall?: boolean;
   meta: ChannelMeta;
   install: ChannelPluginCatalogInstall;
   installSource?: PluginInstallSourceInfo;
@@ -50,6 +54,8 @@ type CatalogOptions = {
   officialCatalogPaths?: string[];
   env?: NodeJS.ProcessEnv;
   excludeWorkspace?: boolean;
+  installRecords?: Record<string, PluginInstallRecord>;
+  discovery?: PluginDiscoveryResult;
 };
 
 const ORIGIN_PRIORITY: Record<PluginOrigin, number> = {
@@ -71,6 +77,7 @@ type ExternalCatalogEntry = {
 const ENV_CATALOG_PATHS = ["OPENCLAW_PLUGIN_CATALOG_PATHS", "OPENCLAW_MPM_CATALOG_PATHS"];
 const OFFICIAL_CHANNEL_CATALOG_RELATIVE_PATH = path.join("dist", "channel-catalog.json");
 const officialCatalogEntriesByPath = new Map<string, ExternalCatalogEntry[] | null>();
+const externalCatalogEntriesByPath = new Map<string, ExternalCatalogEntry[] | null>();
 
 type ManifestKey = typeof MANIFEST_KEY;
 
@@ -127,21 +134,33 @@ function loadExternalCatalogEntries(options: CatalogOptions): ExternalCatalogEnt
   const paths = resolveExternalCatalogPaths(options).map((rawPath) =>
     resolveUserPath(rawPath, options.env ?? process.env),
   );
-  return loadCatalogEntriesFromPaths(paths);
+  return loadCatalogEntriesFromPaths(paths, externalCatalogEntriesByPath);
 }
 
-function loadCatalogEntriesFromPaths(paths: Iterable<string>): ExternalCatalogEntry[] {
+function readCatalogEntriesFromPath(resolvedPath: string): ExternalCatalogEntry[] | null {
+  const payload = tryReadJsonSync(resolvedPath);
+  return payload === null ? null : parseCatalogEntries(payload);
+}
+
+function loadCatalogEntriesFromPaths(
+  paths: Iterable<string>,
+  cache?: Map<string, ExternalCatalogEntry[] | null>,
+): ExternalCatalogEntry[] {
   const entries: ExternalCatalogEntry[] = [];
   for (const resolvedPath of paths) {
-    if (!fs.existsSync(resolvedPath)) {
+    if (cache?.has(resolvedPath)) {
+      const cached = cache.get(resolvedPath);
+      if (cached) {
+        entries.push(...cached);
+      }
       continue;
     }
-    try {
-      const payload = JSON.parse(fs.readFileSync(resolvedPath, "utf-8")) as unknown;
-      entries.push(...parseCatalogEntries(payload));
-    } catch {
-      // Ignore invalid catalog files.
+    const parsed = readCatalogEntriesFromPath(resolvedPath);
+    cache?.set(resolvedPath, parsed);
+    if (parsed === null) {
+      continue;
     }
+    entries.push(...parsed);
   }
   return entries;
 }
@@ -156,18 +175,14 @@ function loadOfficialCatalogEntriesFromPaths(paths: Iterable<string>): ExternalC
       }
       continue;
     }
-    if (!fs.existsSync(resolvedPath)) {
+    const payload = tryReadJsonSync(resolvedPath);
+    if (payload === null) {
       officialCatalogEntriesByPath.set(resolvedPath, null);
       continue;
     }
-    try {
-      const payload = JSON.parse(fs.readFileSync(resolvedPath, "utf-8")) as unknown;
-      const parsed = parseCatalogEntries(payload);
-      officialCatalogEntriesByPath.set(resolvedPath, parsed);
-      entries.push(...parsed);
-    } catch {
-      officialCatalogEntriesByPath.set(resolvedPath, null);
-    }
+    const parsed = parseCatalogEntries(payload);
+    officialCatalogEntriesByPath.set(resolvedPath, parsed);
+    entries.push(...parsed);
   }
   return entries;
 }
@@ -203,7 +218,7 @@ function loadOfficialCatalogEntries(options: CatalogOptions): ChannelPluginCatal
       ? loadCatalogEntriesFromPaths(officialPaths)
       : loadOfficialCatalogEntriesFromPaths(officialPaths);
   return [...builtInEntries, ...fileEntries]
-    .map((entry) => buildExternalCatalogEntry(entry))
+    .map((entry) => buildExternalCatalogEntry(entry, { trustedSourceLinkedOfficialInstall: true }))
     .filter((entry): entry is ChannelPluginCatalogEntry => Boolean(entry));
 }
 
@@ -239,12 +254,26 @@ function toChannelMeta(params: {
 function resolveInstallInfo(params: {
   install?: PluginPackageInstall;
   packageName?: string;
+  packageVersion?: string;
   packageDir?: string;
   workspaceDir?: string;
 }): ChannelPluginCatalogEntry["install"] | null {
   const clawhubSpec = normalizeOptionalString(params.install?.clawhubSpec);
-  const npmSpec =
+  let npmSpec =
     normalizeOptionalString(params.install?.npmSpec) ?? normalizeOptionalString(params.packageName);
+  const packageVersion = normalizeOptionalString(params.packageVersion);
+  const parsedNpmSpec = npmSpec ? parseRegistryNpmSpec(npmSpec) : null;
+  const expectedPackageName = normalizeOptionalString(params.packageName);
+  const parsedPackageName = expectedPackageName ? parseRegistryNpmSpec(expectedPackageName) : null;
+  if (
+    npmSpec &&
+    packageVersion &&
+    isPrereleaseSemverVersion(packageVersion) &&
+    parsedNpmSpec?.selectorKind === "none" &&
+    (!parsedPackageName || parsedNpmSpec.name === parsedPackageName.name)
+  ) {
+    npmSpec = `${parsedNpmSpec.name}@${packageVersion}`;
+  }
   if (!clawhubSpec && !npmSpec) {
     return null;
   }
@@ -295,8 +324,10 @@ function resolveInstallInfo(params: {
 function buildCatalogEntryFromManifest(params: {
   pluginId?: string;
   packageName?: string;
+  packageVersion?: string;
   packageDir?: string;
   origin?: PluginOrigin;
+  trustedSourceLinkedOfficialInstall?: boolean;
   workspaceDir?: string;
   channel?: PluginPackageChannel;
   install?: PluginPackageInstall;
@@ -315,6 +346,7 @@ function buildCatalogEntryFromManifest(params: {
   const install = resolveInstallInfo({
     install: params.install,
     packageName: params.packageName,
+    packageVersion: params.packageVersion,
     packageDir: params.packageDir,
     workspaceDir: params.workspaceDir,
   });
@@ -326,6 +358,9 @@ function buildCatalogEntryFromManifest(params: {
     id,
     ...(pluginId ? { pluginId } : {}),
     ...(params.origin ? { origin: params.origin } : {}),
+    ...(params.trustedSourceLinkedOfficialInstall
+      ? { trustedSourceLinkedOfficialInstall: true }
+      : {}),
     meta,
     install,
     installSource: describePluginInstallSource(install, {
@@ -334,10 +369,18 @@ function buildCatalogEntryFromManifest(params: {
   };
 }
 
-function buildExternalCatalogEntry(entry: ExternalCatalogEntry): ChannelPluginCatalogEntry | null {
+function buildExternalCatalogEntry(
+  entry: ExternalCatalogEntry,
+  options?: {
+    trustedSourceLinkedOfficialInstall?: boolean;
+  },
+): ChannelPluginCatalogEntry | null {
   const manifest = entry[MANIFEST_KEY];
   return buildCatalogEntryFromManifest({
+    pluginId: manifest?.plugin?.id,
     packageName: entry.name,
+    packageVersion: entry.version,
+    trustedSourceLinkedOfficialInstall: options?.trustedSourceLinkedOfficialInstall,
     channel: manifest?.channel,
     install: manifest?.install,
   });
@@ -377,6 +420,8 @@ export function listChannelPluginCatalogEntries(
   const manifestEntries = listChannelCatalogEntries({
     workspaceDir: options.workspaceDir,
     env: options.env,
+    installRecords: options.installRecords,
+    discovery: options.discovery,
   });
   const resolved = new Map<string, { entry: ChannelPluginCatalogEntry; priority: number }>();
 
